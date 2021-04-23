@@ -316,7 +316,10 @@
 #     data = {"status":200,"data":{"message":1}}
 #     return JsonResponse(data)
 
-import logging,traceback 
+import json,logging,traceback,os,boto3  
+from decouple import config
+from boto3.s3.transfer import S3Transfer
+from django.core.files.storage import FileSystemStorage
 from rest_framework.views import APIView 
 from rest_framework.response import Response
 from rest_framework import status 
@@ -324,7 +327,14 @@ from .models import User
 from .serializers import UserSerializer
 from django.contrib.auth import authenticate,login 
 from rest_framework.authtoken.models import Token 
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.authentication import TokenAuthentication 
 logger=logging.getLogger(__name__)
+def checkAuth(request):
+    if Token.objects.filter(key=request.META.get('HTTP_TOKEN')):
+        return Token.objects.filter(key=request.META.get('HTTP_TOKEN'))[0]
+    else:
+        return 0 
 class UserSignUp(APIView):
     '''
     API FOR SIGNUP 
@@ -393,3 +403,88 @@ class LoginView(APIView):
             logger.exception(traceback.format_exc())
             logger.exception("Something went wrong in " + "Post" + "login")
             return Response({"status":True,"message":"Something went wrong"},status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+class ChangePassWord(APIView):
+    '''
+    API FOR CHANGING PASSWORD 
+    YOU SHOULD BE AUTHENICATED USER IN ORDER TO HIT THIS API
+
+    '''
+    authentication_classes = (TokenAuthentication,) 
+    permission_classes=(IsAuthenticated,)
+    def post(self,request):
+        try:
+            params=request.data 
+
+            try:
+                current_password=params.pop("new_password") 
+            except Exception:
+                current_password=None
+            if not current_password:
+                return Response({"status":False, "message":"OOPS, Please Mention New Password"},status=status.HTTP_400_BAD_REQUEST) 
+            try:
+                confirm_password=params.pop("confirm_password") 
+            except Exception:
+                current_password=None  
+            if not confirm_password:
+                return Response({"status":False,"message":"OOPS,Please Confirm your password Once"},status=status.HTTP_400_BAD_REQUEST)
+            if current_password!=confirm_password:
+                return Response({"status":False,"message":"OOPS,Passowrd didn't matched"},status=status.HTTP_400_BAD_REQUEST)
+            try:    
+                old_password=params.pop("old_password") 
+            except Exception:
+                old_password=None 
+            if not old_password:
+                return Response({"status":False,'message':"Old Password is required"},status=status.HTTP_400_BAD_REQUEST)
+            email=request.user.email
+            user=authenticate(email=email,password=old_password)
+            if not user:
+                return Response({"status":False,"message":"Credentials are invalid"},status=status.HTTP_400_BAD_REQUEST)
+            user=User.objects.get(email=email) 
+            user.set_password(current_password)
+            user.save()
+            return Response({"status":True,"message":"Password Updated Successfully"},status=status.HTTP_200_OK)
+        except Exception:
+            logger.exception(traceback.format_exc())
+            logger.exception("Something went wrong in " + "POST" + "changepassword")
+            return Response({"status":False,"message":"OOPS,Something went wrong"},status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+class AvatarView(APIView):
+    def get(self,request):
+        try:
+            token=checkAuth(request)
+            if token== 0:
+                data={"status":403,"data":{"message":"Not logged in"}}
+                return Response(data)
+            AWS_STORAGE_URL=config("AWS_STORAGE_URL",default="")
+            user=token.user 
+            if str(token.user.avatar)!="":
+                data={"status":200,"data":{"url":AWS_STORAGE_URL+str(token.user.profile.avatar)}} 
+            else:
+                data={"status":404,"data":{"message":"avatar missing"}}
+            return Response(data)
+        except Exception:
+            logger.exception(traceback.format_exc())
+            logger.exception("Something went wrong in" + "GET" + "AvatarView")
+            return Response({"status":False,"message":"Something went wrong"},status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    def post(self,request):
+        try:
+            avatar = request.FILES['file']
+            AWS_ACCESS_KEY_ID = config('AWS_ACCESS_KEY_ID', default='')
+            AWS_SECRET_ACCESS_KEY = config('AWS_SECRET_ACCESS_KEY', default='')
+            AWS_STORAGE_BUCKET_RGN = config('AWS_STORAGE_BUCKET_RGN', default='us-east-1')
+            AWS_STORAGE_BUCKET_NAME = config('AWS_STORAGE_BUCKET_NAME', default='test')
+            fs          = FileSystemStorage(os.getcwd()+'/static/img/avatars')
+            fname       = avatar.name
+            filename    = fs.save(fname,avatar)
+            s3_path     = 'avatars/'+fname
+            local_path  = os.getcwd()+'/static/img/avatars/'+fname
+            transfer    = S3Transfer(boto3.client('s3', AWS_STORAGE_BUCKET_RGN,  aws_access_key_id = AWS_ACCESS_KEY_ID, aws_secret_access_key=AWS_SECRET_ACCESS_KEY,use_ssl=False))
+            client      = boto3.client('s3')
+            transfer.upload_file(local_path, AWS_STORAGE_BUCKET_NAME, s3_path,extra_args={'ACL': 'public-read'})
+            User.objects.filter(user=token.user.id).update(avatar=s3_path)
+            os.remove(local_path)
+            token = checkAuth(request)
+            user  = token.user 
+        except Exception as error:
+            logger.exception(traceback.format_exc())
+            logger.exception("Something went wrong " + 'GET' + 'AvatarView')
+            return Response({"status":False,"message":"Something went wrong","error":error},status=status.HTTP_500_INTERNAL_SERVER_ERROR)
